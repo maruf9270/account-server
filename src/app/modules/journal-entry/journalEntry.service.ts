@@ -1,65 +1,162 @@
+/* eslint-disable @typescript-eslint/no-unused-expressions */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import mongoose, { PipelineStage, Types } from "mongoose";
+import mongoose, { mongo, PipelineStage, Types } from "mongoose";
 import QueryBuilder from "../../builder/QueryBuilder";
 import { IJournalEntry } from "./journalEntry.interface";
 import { JournalEntry } from "./journalEntry.model";
 import { v4 as uuidv4 } from "uuid";
 import { paginationHelpers } from "../../helpers/paginationHelper";
 import { generateJournalEntries } from "./journalEntry.helper";
+import AppError from "../../errors/AppError";
+import { StatusCodes } from "http-status-codes";
+import { LedgerBalance } from "../ledger-balance/ledgerBalance.model";
+import { LedgerBalanceService } from "../ledger-balance/ledgerBalance.service";
 
 const post = async (payload: IJournalEntry[]) => {
-  // Generate a unique entryId for the journal group
-  const entryId = uuidv4();
+  const session = await mongoose.startSession();
 
-  // Auto-increment serial number
-  const lastEntry = await JournalEntry.findOne().sort({ serialNo: -1 });
-  const lastSerial = lastEntry ? lastEntry.serialNo : 0;
+  try {
+    // Generate a unique entryId for the journal group
+    const entryId = uuidv4();
 
-  // auto increment journal no
-  const lastJournal = await JournalEntry.aggregate([
-    {
-      $group: {
-        _id: "$entryId",
-        createdAt: { $first: "$createdAt" },
-        journalNo: { $first: "$journalNo" },
-      },
-    },
-    {
-      $sort: {
-        journalNo: -1,
-      },
-    },
-    {
-      $limit: 1,
-    },
-  ]);
-  const lastJournalNo = lastJournal?.length ? lastJournal[0]?.journalNo : 0;
-  const newJournalNo = lastJournalNo + 1;
+    // Auto-increment serial number
+    const lastEntry = await JournalEntry.findOne()
+      .sort({ serialNo: -1 })
+      .session(session);
+    const lastSerial = lastEntry ? lastEntry.serialNo : 0;
 
-  // Assign the entryId and serial number to each entry
-  const entriesWithId = payload.map((entry, index) => ({
-    ...entry,
-    entryId,
-    serialNo: lastSerial + index + 1,
-    journalNo: newJournalNo,
-  }));
+    // auto increment journal no
+    const lastJournal = await JournalEntry.aggregate(
+      [
+        {
+          $group: {
+            _id: "$entryId",
+            createdAt: { $first: "$createdAt" },
+            journalNo: { $first: "$journalNo" },
+          },
+        },
+        {
+          $sort: {
+            journalNo: -1,
+          },
+        },
+        {
+          $limit: 1,
+        },
+      ],
+      { session }
+    );
+    const lastJournalNo = lastJournal?.length ? lastJournal[0]?.journalNo : 0;
+    const newJournalNo = lastJournalNo + 1;
 
-  return await JournalEntry.insertMany(entriesWithId);
+    // Assign the entryId and serial number to each entry
+    session.startTransaction();
+    const entriesWithId = payload.map((entry, index) => ({
+      ...entry,
+      entryId,
+      serialNo: lastSerial + index + 1,
+      journalNo: newJournalNo,
+    }));
+
+    const updateBalance = entriesWithId.map(async (entry) => {
+      await LedgerBalanceService.updateBalance(entry as IJournalEntry);
+    });
+
+    const result = await JournalEntry.insertMany(entriesWithId, { session });
+    await session.commitTransaction();
+    return result;
+  } catch (error) {
+    await session.abortTransaction();
+    throw new AppError(StatusCodes.INTERNAL_SERVER_ERROR, error as string);
+  } finally {
+    await session.endSession();
+  }
 };
 
 const patch = async (payload: Partial<IJournalEntry>[], id: string) => {
-  const bulkOps = payload.map((entry) => ({
-    updateOne: {
-      filter: { entryId: id, serialNo: entry.serialNo }, // Match each entry
-      update: { $set: entry }, // Update fields
-    },
-  }));
+  const session = await mongoose.startSession();
+  try {
+    session.startTransaction();
 
-  return await JournalEntry.bulkWrite(bulkOps);
+    const journals = await JournalEntry.find({ entryId: id }).session(session);
+    if (!journals.length) {
+      throw new AppError(StatusCodes.NOT_FOUND, "Journal Not found");
+    }
+
+    // Updating balance **sequentially** using `for...of`
+    for (const j of journals) {
+      const debitBal = j?.debit ?? 0;
+      const creditBal = j?.credit ?? 0;
+      if (debitBal > 0) {
+        j.credit = debitBal;
+        j.debit = 0;
+      } else {
+        j.debit = creditBal;
+        j.credit = 0;
+      }
+      await LedgerBalanceService.updateBalance(j); // Ensure this runs sequentially
+    }
+
+    // Updating balance with new journal entries **sequentially**
+    if (payload?.length) {
+      for (const j of payload) {
+        await LedgerBalanceService.updateBalance(j as IJournalEntry);
+      }
+    }
+
+    // Prepare bulk update operations
+    const bulkOps = payload.map((entry) => ({
+      updateOne: {
+        filter: { entryId: id, serialNo: entry.serialNo },
+        update: { $set: entry },
+      },
+    }));
+
+    const result = await JournalEntry.bulkWrite(bulkOps, { session });
+
+    await session.commitTransaction();
+    return result;
+  } catch (error) {
+    await session.abortTransaction();
+    throw new AppError(StatusCodes.INTERNAL_SERVER_ERROR, error as string);
+  } finally {
+    await session.endSession();
+  }
 };
 
 const remove = async (id: string) => {
-  return await JournalEntry.deleteMany({ entryId: id });
+  const session = await mongoose.startSession();
+  try {
+    session.startTransaction();
+    const journals = await JournalEntry.find({ entryId: id });
+    if (!journals.length) {
+      throw new AppError(StatusCodes.NOT_FOUND, "No journal entry found");
+    }
+
+    // updating balance
+    const updateBalance = journals.forEach(async (j: IJournalEntry) => {
+      const debitBal = j?.debit ?? 0;
+      const creditBal = j?.credit ?? 0;
+      if (debitBal > 0) {
+        j.credit = debitBal;
+        j.debit = 0;
+      } else {
+        j.debit = creditBal;
+        j.credit = 0;
+      }
+      await LedgerBalanceService.updateBalance(j);
+    });
+
+    // Deleting ledger
+    const result = await JournalEntry.deleteMany({ entryId: id }, { session });
+    await session.commitTransaction();
+    return result;
+  } catch (error) {
+    await session.abortTransaction();
+    throw new AppError(StatusCodes.INTERNAL_SERVER_ERROR, error as string);
+  } finally {
+    await session.endSession();
+  }
 };
 
 const get = async (id: string) => {
@@ -148,9 +245,9 @@ const getAll = async (query: Record<string, any>) => {
         date: 1, // Keep date field
       },
     }, // Stage 5: Pagination (skip & limit)
+    { $sort: { date: -1 } },
     { $skip: skip },
     { $limit: limit },
-    { $sort: { date: -1 } },
   ];
 
   const totalDocument = await JournalEntry.aggregate([
@@ -165,7 +262,7 @@ const getAll = async (query: Record<string, any>) => {
   ]);
 
   const result = await JournalEntry.aggregate(pipeline as PipelineStage[]);
-
+  console.log(result);
   return {
     data: result,
     meta: {

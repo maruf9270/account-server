@@ -17,7 +17,6 @@ const post = async (payload: IVoucher) => {
   // Auto-increment serial number
   const lastEntry = await VoucherModel.find().sort({ voucherNo: -1 }).limit(1);
   const lastSerial = lastEntry?.length ? lastEntry[0].voucherNo : 0;
-  console.log(lastEntry);
 
   // Assign the entryId and serial number to each entry
   payload.voucherNo = Number(lastSerial) + 1;
@@ -26,7 +25,7 @@ const post = async (payload: IVoucher) => {
     case ENUM_VOUCHER_TYPE.Debit:
       journalEntry = await journalEntryService.post([
         {
-          account: payload.cashOrBankAc,
+          account: payload.account,
           comment: payload?.description,
           debit: payload.amount,
           credit: 0,
@@ -34,7 +33,7 @@ const post = async (payload: IVoucher) => {
           budgetType: payload.budgetType,
         },
         {
-          account: payload.account,
+          account: payload.cashOrBankAc,
           comment: payload?.description,
           debit: 0,
           credit: payload.amount,
@@ -71,6 +70,7 @@ const post = async (payload: IVoucher) => {
       break;
   }
 
+  console.log(journalEntry);
   payload.journalRef = journalEntry[0]?.entryId;
   return await VoucherModel.create(payload);
 };
@@ -86,10 +86,8 @@ const remove = async (id: string) => {
       throw new AppError(StatusCodes.BAD_REQUEST, "Voucher not found");
     }
     await VoucherModel.findByIdAndDelete(id, { session });
-    await JournalEntry.deleteMany(
-      { entryId: doesExists.journalRef },
-      { session }
-    );
+    await journalEntryService.remove(doesExists.journalRef);
+
     await session.commitTransaction();
     return;
   } catch (error) {
@@ -108,7 +106,6 @@ const getForPrint = async (id: string) => {
 };
 
 const getAll = async (query: Record<string, any>) => {
-  console.log(query);
   const to = query?.to ?? Date.now();
   const { limit, page, skip, sortBy, sortOrder } =
     paginationHelpers.calculatePagination({

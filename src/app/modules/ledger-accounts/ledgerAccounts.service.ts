@@ -1,9 +1,14 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import mongoose, { PipelineStage, Types } from "mongoose";
 import QueryBuilder from "../../builder/QueryBuilder";
-import { ENUMAccountType, TLedgerAccount } from "./ledgerAccounts.interface";
+import {
+  ENUMAccountType,
+  TLedgerAccount,
+  TLedgerAccountWithPopulatedCategory,
+} from "./ledgerAccounts.interface";
 import { Ledger } from "./ledgerAccounts.model";
 import { JournalEntry } from "../journal-entry/journalEntry.model";
+import { IAccountCategory } from "../account-category/accountCategour.interface";
 
 const post = async (payload: TLedgerAccount) => {
   return await Ledger.create(payload);
@@ -169,18 +174,19 @@ const getIncomeStatement = async (startDate: Date, endDate: Date) => {
   };
 
   // Get all revenue and expense accounts
-  const accounts = await Ledger.find({
+  const accounts = (await Ledger.find({
     accountType: {
       $in: [ENUMAccountType.INCOME, ENUMAccountType.EXPENSE],
     },
   })
     .lean()
-    .populate("accountCategory");
+    .populate(
+      "accountCategory"
+    )) as unknown as TLedgerAccountWithPopulatedCategory[];
 
-  console.log(accounts);
   // Process each account
   const incomeStatementItems = await Promise.all(
-    accounts.map(async (account) => {
+    accounts.map(async (account: TLedgerAccountWithPopulatedCategory) => {
       // Get sum of debits and credits for this account within the date range
       const journalSummary = await JournalEntry.aggregate([
         {
@@ -218,6 +224,10 @@ const getIncomeStatement = async (startDate: Date, endDate: Date) => {
         accountName: account.name,
         accountType: account.accountType,
         amount: amount,
+        accountCategory:
+          account?.accountCategory && typeof account.accountCategory == "object"
+            ? account?.accountCategory?.name
+            : "Other",
       };
     })
   );

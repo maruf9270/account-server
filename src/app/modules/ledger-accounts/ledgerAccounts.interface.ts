@@ -1,4 +1,5 @@
 import { Types } from "mongoose";
+import { IAccountCategory } from "../account-category/accountCategour.interface";
 
 export enum ENUM_BALANCE_TYPE {
   BANK = "bank",
@@ -17,10 +18,17 @@ export interface TLedgerAccount {
   accountType: ENUMAccountType;
   createdAt: string;
   updatedAt: string;
-  accountCategory: Types.ObjectId;
+  accountCategory: Types.ObjectId | IAccountCategory;
   useAsBalance: boolean;
   balanceType?: ENUM_BALANCE_TYPE;
 }
+
+export type TLedgerAccountWithPopulatedCategory = Omit<
+  TLedgerAccount,
+  "accountCategory"
+> & {
+  accountCategory: IAccountCategory;
+};
 
 export enum ENUMAccountType {
   ASSETS = "asset",

@@ -18,7 +18,6 @@ export const cacheServer = new NodeCache({ stdTTL: 3600, checkperiod: 3600 });
 //? module routes
 
 app.use("/api/v1", router);
-app.use(cors({ origin: config.front_end_url, credentials: true }));
 app.get("/", (req: Request, res: Response) => {
   res.send("Hello from Account");
 });
