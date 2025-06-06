@@ -70,12 +70,98 @@ const post = async (payload: IVoucher) => {
       break;
   }
 
-  console.log(journalEntry);
   payload.journalRef = journalEntry[0]?.entryId;
   return await VoucherModel.create(payload);
 };
 
-const patch = async (payload: Partial<IVoucher>, id: string) => {};
+const patch = async (
+  payload: Partial<IVoucher & { _id: string }>,
+  id: string
+) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const doesExists = await VoucherModel.findById(id);
+    if (!doesExists) {
+      throw new AppError(StatusCodes.BAD_REQUEST, "Voucher not found");
+    }
+
+    if (payload.amount !== doesExists?.amount) {
+      // 1. Delete Journal
+      await JournalEntry.deleteMany({ entryId: doesExists.journalRef }).session(
+        session
+      );
+
+      // 2. Give new Journal entry
+      let journalEntry: any;
+      switch (payload.voucherType) {
+        case ENUM_VOUCHER_TYPE.Debit:
+          journalEntry = await journalEntryService.post([
+            {
+              account: payload.account,
+              comment: payload?.description,
+              debit: payload.amount,
+              credit: 0,
+              journalType: "general",
+              budgetType: payload.budgetType,
+            },
+            {
+              account: payload.cashOrBankAc,
+              comment: payload?.description,
+              debit: 0,
+              credit: payload.amount,
+              journalType: "general",
+              budgetType: payload.budgetType,
+            },
+          ] as IJournalEntry[]);
+
+          break;
+
+        case ENUM_VOUCHER_TYPE.Credit:
+          journalEntry = await journalEntryService.post([
+            {
+              account: payload.account,
+              comment: payload?.description,
+              debit: 0,
+              credit: payload.amount,
+              journalType: "general",
+              budgetType: payload.budgetType,
+            },
+            {
+              account: payload.cashOrBankAc,
+              comment: payload?.description,
+              debit: payload.amount,
+              credit: 0,
+              journalType: "general",
+              budgetType: payload.budgetType,
+            },
+          ] as IJournalEntry[]);
+
+          break;
+
+        default:
+          break;
+      }
+
+      payload.journalRef = journalEntry[0]?.entryId;
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { _id, ...rest } = payload;
+
+      // 3. Update Voucher
+      await VoucherModel.updateOne(
+        { _id: new Types.ObjectId(id as string) },
+        rest,
+        { session }
+      );
+    }
+    await session.commitTransaction();
+    return;
+  } catch (error) {
+    console.error(error);
+    await session.abortTransaction();
+    throw new AppError(StatusCodes.BAD_REQUEST, error as string);
+  }
+};
 
 const remove = async (id: string) => {
   const session = await mongoose.startSession();
